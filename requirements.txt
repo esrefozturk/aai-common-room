@@ -1,0 +1,7 @@
+google-genai>=1.0.0
+boto3
+Pillow
+requests
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2

@@ -1,0 +1,201 @@
+name: Deploy to ECR & ECS
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_DEFAULT_REGION }}
+
+      - name: Log in to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push Docker image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPO: aai-common-room-pipeline
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPO --region $AWS_REGION 2>/dev/null || \
+            aws ecr create-repository --repository-name $ECR_REPO --region $AWS_REGION
+          docker build -t $ECR_REGISTRY/$ECR_REPO:latest .
+          docker push $ECR_REGISTRY/$ECR_REPO:latest
+          echo "image=$ECR_REGISTRY/$ECR_REPO:latest" >> $GITHUB_OUTPUT
+
+      - name: Ensure ECS cluster and S3 bucket exist
+        env:
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          S3_BUCKET: aai-common-room-episodes
+        run: |
+          aws ecs create-cluster --cluster-name aai-common-room --region $AWS_REGION 2>/dev/null || true
+          aws logs create-log-group --log-group-name /ecs/aai-common-room --region $AWS_REGION 2>/dev/null || true
+          aws s3 mb s3://$S3_BUCKET --region $AWS_REGION 2>/dev/null || true
+          echo "ECS cluster, logs, and S3 bucket ready."
+
+      - name: Ensure Secrets Manager secret exists
+        env:
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          aws secretsmanager create-secret \
+            --name "aai-common-room/api-keys" \
+            --secret-string '{
+              "AAI_GEMINI_API_KEY_1": "${{ secrets.AAI_GEMINI_API_KEY_1 }}",
+              "AAI_GEMINI_API_KEY_2": "${{ secrets.AAI_GEMINI_API_KEY_2 }}",
+              "AAI_GEMINI_API_KEY_3": "${{ secrets.AAI_GEMINI_API_KEY_3 }}",
+              "AAI_GEMINI_API_KEY_4": "${{ secrets.AAI_GEMINI_API_KEY_4 }}",
+              "AWS_ACCESS_KEY_ID": "${{ secrets.AWS_ACCESS_KEY_ID }}",
+              "AWS_SECRET_ACCESS_KEY": "${{ secrets.AWS_SECRET_ACCESS_KEY }}",
+              "AWS_DEFAULT_REGION": "${{ secrets.AWS_DEFAULT_REGION }}",
+              "AAI_S3_BUCKET": "aai-common-room-episodes"
+            }' \
+            --region $AWS_REGION 2>/dev/null || \
+          aws secretsmanager put-secret-value \
+            --secret-id "aai-common-room/api-keys" \
+            --secret-string '{
+              "AAI_GEMINI_API_KEY_1": "${{ secrets.AAI_GEMINI_API_KEY_1 }}",
+              "AAI_GEMINI_API_KEY_2": "${{ secrets.AAI_GEMINI_API_KEY_2 }}",
+              "AAI_GEMINI_API_KEY_3": "${{ secrets.AAI_GEMINI_API_KEY_3 }}",
+              "AAI_GEMINI_API_KEY_4": "${{ secrets.AAI_GEMINI_API_KEY_4 }}",
+              "AWS_ACCESS_KEY_ID": "${{ secrets.AWS_ACCESS_KEY_ID }}",
+              "AWS_SECRET_ACCESS_KEY": "${{ secrets.AWS_SECRET_ACCESS_KEY }}",
+              "AWS_DEFAULT_REGION": "${{ secrets.AWS_DEFAULT_REGION }}",
+              "AAI_S3_BUCKET": "aai-common-room-episodes"
+            }' \
+            --region $AWS_REGION
+          echo "Secrets ready."
+
+      - name: Ensure IAM roles exist
+        env:
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+          S3_BUCKET: aai-common-room-episodes
+        run: |
+          AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+
+          # Task role (ECS container permissions)
+          aws iam create-role --role-name aai-common-room-task-role \
+            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' 2>/dev/null || true
+          aws iam put-role-policy --role-name aai-common-room-task-role --policy-name s3-secrets \
+            --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[
+              {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:PutObject\",\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::$S3_BUCKET\",\"arn:aws:s3:::$S3_BUCKET/*\"]},
+              {\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\",\"secretsmanager:PutSecretValue\",\"secretsmanager:UpdateSecret\"],\"Resource\":\"arn:aws:secretsmanager:$AWS_REGION:${AWS_ACCOUNT}:secret:aai-common-room/*\"}
+            ]}"
+
+          # Lambda role
+          aws iam create-role --role-name aai-common-room-lambda-role \
+            --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}' 2>/dev/null || true
+          aws iam attach-role-policy --role-name aai-common-room-lambda-role \
+            --policy-arn arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole 2>/dev/null || true
+          aws iam put-role-policy --role-name aai-common-room-lambda-role --policy-name ecs \
+            --policy-document '{"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":["ecs:RunTask","iam:PassRole","ecs:DescribeTasks"],"Resource":"*"}
+            ]}'
+
+          echo "IAM roles ready."
+
+      - name: Register ECS task definition
+        env:
+          ECR_REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          ECR_REPO: aai-common-room-pipeline
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          NEW_IMAGE="$ECR_REGISTRY/$ECR_REPO:latest"
+          AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          SECRET_ARN=$(aws secretsmanager describe-secret --secret-id "aai-common-room/api-keys" --query ARN --output text --region $AWS_REGION)
+          YT_SECRET_ARN=$(aws secretsmanager describe-secret --secret-id "aai-common-room/youtube" --query ARN --output text --region $AWS_REGION)
+
+          aws ecs register-task-definition \
+            --family aai-common-room-pipeline \
+            --requires-compatibilities FARGATE \
+            --network-mode awsvpc \
+            --cpu 4096 \
+            --memory 8192 \
+            --execution-role-arn "arn:aws:iam::${AWS_ACCOUNT}:role/ecsTaskExecutionRole" \
+            --task-role-arn "arn:aws:iam::${AWS_ACCOUNT}:role/aai-common-room-task-role" \
+            --container-definitions "[{
+              \"name\": \"pipeline\",
+              \"image\": \"$NEW_IMAGE\",
+              \"essential\": true,
+              \"secrets\": [
+                {\"name\": \"AAI_GEMINI_API_KEY_1\",    \"valueFrom\": \"${SECRET_ARN}:AAI_GEMINI_API_KEY_1::\"},
+                {\"name\": \"AAI_GEMINI_API_KEY_2\",    \"valueFrom\": \"${SECRET_ARN}:AAI_GEMINI_API_KEY_2::\"},
+                {\"name\": \"AAI_GEMINI_API_KEY_3\",    \"valueFrom\": \"${SECRET_ARN}:AAI_GEMINI_API_KEY_3::\"},
+                {\"name\": \"AAI_GEMINI_API_KEY_4\",    \"valueFrom\": \"${SECRET_ARN}:AAI_GEMINI_API_KEY_4::\"},
+                {\"name\": \"AWS_ACCESS_KEY_ID\",       \"valueFrom\": \"${SECRET_ARN}:AWS_ACCESS_KEY_ID::\"},
+                {\"name\": \"AWS_SECRET_ACCESS_KEY\",   \"valueFrom\": \"${SECRET_ARN}:AWS_SECRET_ACCESS_KEY::\"},
+                {\"name\": \"AWS_DEFAULT_REGION\",      \"valueFrom\": \"${SECRET_ARN}:AWS_DEFAULT_REGION::\"},
+                {\"name\": \"AAI_S3_BUCKET\",           \"valueFrom\": \"${SECRET_ARN}:AAI_S3_BUCKET::\"}
+              ],
+              \"logConfiguration\": {
+                \"logDriver\": \"awslogs\",
+                \"options\": {
+                  \"awslogs-group\": \"/ecs/aai-common-room\",
+                  \"awslogs-region\": \"$AWS_REGION\",
+                  \"awslogs-stream-prefix\": \"ecs\"
+                }
+              }
+            }]" --region $AWS_REGION
+          echo "Task definition registered."
+
+      - name: Deploy Lambda function
+        env:
+          LAMBDA_NAME: aai-common-room-scheduler
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          cd infra && zip lambda.zip lambda_handler.py && cd ..
+          AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          LAMBDA_ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT}:role/aai-common-room-lambda-role"
+          SUBNET_ID=$(aws ec2 describe-subnets --filters "Name=defaultForAz,Values=true" --query 'Subnets[0].SubnetId' --output text --region $AWS_REGION)
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text --region $AWS_REGION)
+
+          aws lambda update-function-code \
+            --function-name $LAMBDA_NAME \
+            --zip-file fileb://infra/lambda.zip \
+            --region $AWS_REGION 2>/dev/null && echo "Lambda updated." || {
+            echo "Lambda not found — creating..."
+            sleep 15
+            aws lambda create-function \
+              --function-name $LAMBDA_NAME \
+              --runtime python3.11 \
+              --role $LAMBDA_ROLE_ARN \
+              --handler lambda_handler.handler \
+              --zip-file fileb://infra/lambda.zip \
+              --timeout 60 \
+              --environment "Variables={ECS_CLUSTER=aai-common-room,ECS_TASK_DEF=aai-common-room-pipeline,SUBNET_ID=$SUBNET_ID,SECURITY_GROUP_ID=$SG_ID,CONTAINER_NAME=pipeline}" \
+              --region $AWS_REGION
+            echo "Lambda created."
+          }
+
+      - name: Set EventBridge schedule (1 AM UTC daily)
+        env:
+          LAMBDA_NAME: aai-common-room-scheduler
+          AWS_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
+        run: |
+          AWS_ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+          LAMBDA_ARN="arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT}:function:${LAMBDA_NAME}"
+
+          RULE_ARN=$(aws events put-rule \
+            --name aai-common-room-daily \
+            --schedule-expression "cron(0 1 * * ? *)" \
+            --state ENABLED \
+            --region $AWS_REGION \
+            --query RuleArn --output text)
+          aws events put-targets --rule aai-common-room-daily \
+            --targets "[{\"Id\":\"1\",\"Arn\":\"$LAMBDA_ARN\"}]" --region $AWS_REGION
+          aws lambda add-permission --function-name $LAMBDA_NAME \
+            --statement-id eventbridge-daily --action lambda:InvokeFunction \
+            --principal events.amazonaws.com --source-arn $RULE_ARN \
+            --region $AWS_REGION 2>/dev/null || true
+
+          echo "Schedule set: 1 AM UTC daily."

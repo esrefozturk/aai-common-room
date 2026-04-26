@@ -1,0 +1,13 @@
+output/
+output_old/
+token.json
+credentials.json
+auth_youtube.py
+*.mp3
+*.mp4
+*.png
+*.log
+__pycache__/
+*.pyc
+.env
+infra/lambda.zip
