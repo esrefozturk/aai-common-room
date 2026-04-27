@@ -7,10 +7,35 @@ Auto-refreshes and saves back on each run.
 import json
 import os
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube",
+    "https://www.googleapis.com/auth/youtube.upload",
+]
 TOKEN_FILE = "token.json"
 CREDENTIALS_FILE = "credentials.json"
 SECRET_ID = "aai-common-room/youtube"
+
+
+def _clean_title(book_title: str) -> str:
+    """Return clean display title, stripping subtitles and suffixes."""
+    import re
+    t = book_title
+    # Strip catalog metadata (e.g. ": $b [Peter and Wendy]")
+    t = re.sub(r'\s*:\s*\$b\s*.*', '', t)
+    # Split on ; or : and take the first part
+    for sep in (';', ':'):
+        parts = t.split(sep)
+        if len(parts) > 1:
+            t = parts[0]
+    # Strip "— Complete / Volume / Part ..." and ", Complete / a novel / ..."
+    t = re.sub(r'\s*—\s*(Complete|Volume|Part).*', '', t, flags=re.IGNORECASE)
+    t = re.sub(r',\s*(Complete|a|an|the)\s*\w*$', '', t, flags=re.IGNORECASE)
+    t = t.strip()
+    # Fix all-lowercase titles
+    if t == t.lower():
+        t = t.title()
+        t = re.sub(r"(\w)'(\w)", lambda m: m.group(1) + "'" + m.group(2).lower(), t)
+    return t
 
 
 def _get_youtube_client():
@@ -147,6 +172,13 @@ def upload_video(video_path: str, cover_path: str, book_title: str, script: str,
         except Exception as e:
             print(f"  Thumbnail upload failed: {e}")
 
+    # YouTube ignores containsSyntheticMedia on insert — must update separately
+    youtube.videos().update(
+        part="status",
+        body={"id": video_id, "status": {"containsSyntheticMedia": True}},
+    ).execute()
+    print("  containsSyntheticMedia set.")
+
     return url
 
 
@@ -155,19 +187,20 @@ def upload_short(video_path: str, cover_path: str, book_title: str, privacy: str
     from googleapiclient.http import MediaFileUpload
 
     youtube = _get_youtube_client()
+    clean = _clean_title(book_title)
 
-    title = f"{book_title} in 30 Seconds | #Shorts | AAI Common Room"
+    title = f"{clean} in 30 Seconds | #Shorts | AAI Common Room"
     description = (
-        f"A quick take on \"{book_title}\" from The AAI Common Room.\n\n"
-        f"Full episode on our channel!\n\n"
-        f"#Shorts #Books #BookTok #AAICommonRoom"
+        f"A quick take on \"{clean}\" from The AAI Common Room.\n\n"
+        f"Watch the full episode on our channel!\n\n"
+        f"#Shorts #Books #BookTok #AAICommonRoom #BookSummary"
     )
 
     body = {
         "snippet": {
             "title": title,
             "description": description,
-            "tags": ["Shorts", "Books", "BookSummary", "AAICommonRoom", book_title],
+            "tags": ["Shorts", "Books", "BookSummary", "AAICommonRoom", "BookTok", clean],
             "categoryId": "27",
             "defaultLanguage": "en",
             "defaultAudioLanguage": "en",
@@ -212,4 +245,38 @@ def upload_short(video_path: str, cover_path: str, book_title: str, privacy: str
         except Exception as e:
             print(f"  Short thumbnail upload failed: {e}")
 
+    youtube.videos().update(
+        part="status",
+        body={"id": video_id, "status": {"containsSyntheticMedia": True}},
+    ).execute()
+    print("  containsSyntheticMedia set.")
+
     return url
+
+
+def notify_telegram(book_title: str, episode_url: str, short_url: str):
+    """Send Telegram notification with episode links."""
+    try:
+        import boto3, requests as req
+        region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+        secret = json.loads(
+            boto3.client("secretsmanager", region_name=region)
+            .get_secret_value(SecretId="sazaktechs/telegram")["SecretString"]
+        )
+        token = secret["bot_token"]
+        chat_id = secret["chat_id"]
+        clean = _clean_title(book_title)
+        msg = (
+            f"✅ <b>AAI Common Room — New Episode</b>\n\n"
+            f"<b>Book:</b> {clean}\n"
+            f"<b>Episode:</b> {episode_url}\n"
+            f"<b>Short:</b> {short_url}"
+        )
+        req.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"},
+            timeout=10,
+        )
+        print("  Telegram notification sent.")
+    except Exception as e:
+        print(f"  Telegram notification failed: {e}")

@@ -15,7 +15,7 @@ from src.script_generator import generate_script
 from src.tts import generate_audio
 from src.video import generate_cover, generate_video
 from src.short import generate_short
-from src.youtube import upload_video, upload_short
+from src.youtube import upload_video, upload_short, notify_telegram
 
 GUTENBERG_SEARCH = "https://gutendex.com/books?search={}&languages=en"
 GUTENBERG_POPULAR = "https://gutendex.com/books?sort=popular&languages=en"
@@ -185,6 +185,7 @@ def run_pipeline():
     print(f"  Short:   {short_url}")
 
     mark_published(exact_title)
+    notify_telegram(exact_title, video_url, short_url)
     print(f"\nDone! {exact_title}")
 
 
