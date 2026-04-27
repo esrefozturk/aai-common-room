@@ -156,7 +156,7 @@ def upload_short(video_path: str, cover_path: str, book_title: str, privacy: str
 
     youtube = _get_youtube_client()
 
-    title = f"{book_title} in 60 Seconds | #Shorts | AAI Common Room"
+    title = f"{book_title} in 30 Seconds | #Shorts | AAI Common Room"
     description = (
         f"A quick take on \"{book_title}\" from The AAI Common Room.\n\n"
         f"Full episode on our channel!\n\n"
