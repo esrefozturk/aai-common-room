@@ -21,7 +21,7 @@ GUTENBERG_SEARCH = "https://gutendex.com/books?search={}&languages=en"
 GUTENBERG_POPULAR = "https://gutendex.com/books?sort=popular&languages=en"
 OUTPUT_DIR = "output"
 DURATION_MINUTES = 60
-PRIVACY = "unlisted"
+PRIVACY = "public"
 
 
 def _get_with_retry(url: str, **kwargs) -> requests.Response:
