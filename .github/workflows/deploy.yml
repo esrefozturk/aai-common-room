@@ -188,7 +188,7 @@ jobs:
           RULE_ARN=$(aws events put-rule \
             --name aai-common-room-daily \
             --schedule-expression "cron(0 1 * * ? *)" \
-            --state ENABLED \
+            --state DISABLED \
             --region $AWS_REGION \
             --query RuleArn --output text)
           aws events put-targets --rule aai-common-room-daily \
